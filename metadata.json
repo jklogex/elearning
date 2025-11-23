@@ -1,0 +1,5 @@
+{
+  "name": "SimpleLMS",
+  "description": "Un sistema de gestión de aprendizaje ligero para capacitar empleados con video, audio y documentos, con generación de cuestionarios por IA.",
+  "requestFramePermissions": []
+}
