@@ -88,20 +88,19 @@ export const createCourse = async (course: Omit<Course, 'id'>): Promise<string> 
   // Clean the course data before saving - Firestore doesn't accept undefined values
   const cleanedModules = (course.modules || []).map((module, index) => {
     try {
-      // Convert ModuleType enum to string
-      // ModuleType is a string enum, so it should already be a string
+      // Convert ModuleType enum to string - handle both enum and string values
       let typeString: string = 'DOCUMENT'; // default
-      if (typeof module.type === 'string') {
-        typeString = module.type;
-      } else if (module.type) {
-        // Handle enum case
-        const typeValue = String(module.type);
-        if (['VIDEO', 'AUDIO', 'DOCUMENT'].includes(typeValue)) {
-          typeString = typeValue;
+      if (module.type) {
+        // If it's already a string, use it
+        if (typeof module.type === 'string') {
+          typeString = module.type;
         } else {
-          // Extract from enum string like "ModuleType.DOCUMENT"
-          const match = typeValue.match(/(VIDEO|AUDIO|DOCUMENT)/);
-          typeString = match ? match[1] : 'DOCUMENT';
+          // If it's an enum, get the value
+          typeString = (module.type as any).valueOf ? String((module.type as any).valueOf()) : String(module.type);
+        }
+        // Validate it's one of the allowed values
+        if (!['VIDEO', 'AUDIO', 'DOCUMENT'].includes(typeString)) {
+          typeString = 'DOCUMENT';
         }
       }
       
@@ -140,8 +139,19 @@ export const createCourse = async (course: Omit<Course, 'id'>): Promise<string> 
       };
       
       // Only add optional fields if they have truthy values
+      // Check data URL size - Firestore has 1MB limit per field
       if (module.contentUrl && typeof module.contentUrl === 'string' && module.contentUrl.trim() !== '') {
-        cleanedModule.contentUrl = module.contentUrl.trim();
+        const contentUrl = module.contentUrl.trim();
+        // If it's a data URL, check size (base64 is ~33% larger than binary)
+        if (contentUrl.startsWith('data:')) {
+          const base64Data = contentUrl.split(',')[1] || '';
+          const sizeInBytes = (base64Data.length * 3) / 4;
+          // Warn if too large, but still try to save (Firestore will error if too big)
+          if (sizeInBytes > 900000) { // ~900KB to be safe
+            console.warn(`Module ${index} contentUrl is large (${Math.round(sizeInBytes / 1024)}KB). Consider using Firebase Storage instead.`);
+          }
+        }
+        cleanedModule.contentUrl = contentUrl;
       }
       if (module.textContent && typeof module.textContent === 'string' && module.textContent.trim() !== '') {
         cleanedModule.textContent = module.textContent.trim();
@@ -170,9 +180,102 @@ export const createCourse = async (course: Omit<Course, 'id'>): Promise<string> 
     passThreshold: typeof course.passThreshold === 'number' ? course.passThreshold : 70
   };
   
-  // Deep clean function: recursively remove undefined, null, and invalid values
-  // BUT preserve required fields like 'quiz' which must always be an array
-  const deepClean = (obj: any, depth: number = 0): any => {
+  // Simple function to remove undefined values and ensure all arrays are valid
+  const removeUndefined = (obj: any): any => {
+    if (obj === null || obj === undefined) {
+      return null;
+    }
+    
+    if (Array.isArray(obj)) {
+      return obj
+        .map(item => removeUndefined(item))
+        .filter(item => item !== null && item !== undefined);
+    }
+    
+    if (typeof obj === 'object' && obj.constructor === Object) {
+      const cleaned: any = {};
+      for (const key in obj) {
+        if (obj.hasOwnProperty(key)) {
+          const value = obj[key];
+          if (value !== undefined) {
+            cleaned[key] = removeUndefined(value);
+          }
+        }
+      }
+      return cleaned;
+    }
+    
+    return obj;
+  };
+  
+  // Update cleanedCourse with the fixed modules
+  cleanedCourse.modules = cleanedModules;
+  
+  // Remove undefined values
+  const finalCleanedCourse = removeUndefined(cleanedCourse);
+  
+  // Ensure modules is an array (even if empty)
+  if (!Array.isArray(finalCleanedCourse.modules)) {
+    finalCleanedCourse.modules = [];
+  }
+  
+  // CRITICAL: Ensure all modules have quiz as an array and are properly structured
+  finalCleanedCourse.modules.forEach((module: any, idx: number) => {
+    // Ensure quiz is always an array
+    if (!Array.isArray(module.quiz)) {
+      module.quiz = [];
+    }
+    
+    // Clean quiz items - ensure all are valid objects with no undefined values
+    if (Array.isArray(module.quiz)) {
+      module.quiz = module.quiz
+        .filter((q: any) => {
+          // Only keep valid quiz items
+          return q && 
+                 typeof q === 'object' && 
+                 q.question && 
+                 typeof q.question === 'string' &&
+                 Array.isArray(q.options);
+        })
+        .map((q: any) => ({
+          question: String(q.question || ''),
+          options: Array.isArray(q.options) 
+            ? q.options
+                .filter((opt: any) => opt != null && opt !== '')
+                .map((opt: any) => String(opt))
+            : [],
+          correctAnswerIndex: typeof q.correctAnswerIndex === 'number' 
+            ? Math.max(0, Math.min(q.correctAnswerIndex, (q.options?.length || 1) - 1))
+            : 0
+        }));
+    }
+    
+    // Ensure all required fields are strings (not undefined)
+    if (!module.id || typeof module.id !== 'string') {
+      module.id = `module-${idx}`;
+    }
+    if (!module.title || typeof module.title !== 'string') {
+      module.title = 'Módulo sin título';
+    }
+    // CRITICAL: Ensure type is always a string, not an enum
+    if (!module.type || typeof module.type !== 'string') {
+      module.type = 'DOCUMENT';
+    } else {
+      // Force to string if it's somehow still an enum
+      module.type = String(module.type);
+      if (!['VIDEO', 'AUDIO', 'DOCUMENT'].includes(module.type)) {
+        module.type = 'DOCUMENT';
+      }
+    }
+    
+    // Ensure description is always a string
+    if (!module.description || typeof module.description !== 'string') {
+      module.description = '';
+    }
+  });
+  
+  // Final sanitization - remove any undefined values and ensure all nested structures are valid
+  const sanitizeForFirestore = (obj: any, depth: number = 0): any => {
     // Prevent infinite recursion
     if (depth > 10) {
       return null;
@@ -182,46 +285,31 @@ export const createCourse = async (course: Omit<Course, 'id'>): Promise<string> 
       return null;
     }
     
-    // Handle arrays - filter out invalid items but preserve the array structure
+    // Handle arrays - ensure all items are valid
     if (Array.isArray(obj)) {
       const cleaned = obj
-        .map(item => deepClean(item, depth + 1))
+        .map(item => sanitizeForFirestore(item, depth + 1))
         .filter(item => {
-          // Remove null, undefined, empty objects, and empty strings
-          if (item === null || item === undefined || item === '') return false;
+          // Remove null, undefined, and invalid items
+          if (item === null || item === undefined) return false;
+          // Remove empty objects
           if (typeof item === 'object' && Object.keys(item).length === 0) return false;
           return true;
         });
       return cleaned;
     }
     
-    // Handle objects - special handling for modules to ensure quiz is always an array
+    // Handle objects - ensure all properties are valid
     if (typeof obj === 'object' && obj.constructor === Object) {
       const cleaned: any = {};
-      
-      // Check if this looks like a module (has id, title, type)
-      const isModule = obj.id !== undefined && obj.title !== undefined && obj.type !== undefined;
-      
       for (const key in obj) {
         if (obj.hasOwnProperty(key)) {
           const value = obj[key];
-          
-          // Special handling for quiz field in modules - always ensure it's an array
-          if (isModule && key === 'quiz') {
-            if (Array.isArray(value)) {
-              cleaned[key] = deepClean(value, depth + 1);
-            } else {
-              // Force quiz to be an array if it's not
-              cleaned[key] = [];
-            }
-            continue;
-          }
-          
-          // Skip undefined and null for other fields
-          if (value !== undefined && value !== null) {
-            const cleanedValue = deepClean(value, depth + 1);
-            // Only add if it's a valid value (not null, undefined, or empty object)
-            if (cleanedValue !== undefined && cleanedValue !== null) {
+          // Skip undefined values
+          if (value !== undefined) {
+            const cleanedValue = sanitizeForFirestore(value, depth + 1);
+            // Only add if it's a valid value
+            if (cleanedValue !== null && cleanedValue !== undefined) {
               // For arrays, always include them (even if empty)
               if (Array.isArray(cleanedValue)) {
                 cleaned[key] = cleanedValue;
@@ -235,88 +323,154 @@ export const createCourse = async (course: Omit<Course, 'id'>): Promise<string> 
       return cleaned;
     }
     
-    // Handle primitives - return as is
+    // Handle primitives
     return obj;
   };
   
-  // CRITICAL: Ensure all modules have quiz as an array BEFORE deepClean
-  cleanedModules.forEach((module: any) => {
-    if (!Array.isArray(module.quiz)) {
-      module.quiz = [];
-    }
-  });
-  
-  // Update cleanedCourse with the fixed modules
-  cleanedCourse.modules = cleanedModules;
-  
-  // Deep clean the entire course object
-  const finalCleanedCourse = deepClean(cleanedCourse);
-  
-  // Ensure modules is an array (even if empty)
-  if (!Array.isArray(finalCleanedCourse.modules)) {
-    finalCleanedCourse.modules = [];
-  }
-  
-  // CRITICAL: Ensure all modules have quiz as an array AFTER deepClean too
-  finalCleanedCourse.modules.forEach((module: any) => {
-    if (!Array.isArray(module.quiz)) {
-      module.quiz = [];
-    }
-  });
+  const sanitizedCourse = sanitizeForFirestore(finalCleanedCourse);
   
   // Final validation and logging
-  console.log('Final course data:', JSON.stringify(finalCleanedCourse, null, 2));
-  console.log('Modules count:', finalCleanedCourse.modules.length);
+  console.log('Final course data:', JSON.stringify(sanitizedCourse, null, 2));
+  console.log('Modules count:', sanitizedCourse.modules?.length || 0);
   
-  // Validate each module structure
-  finalCleanedCourse.modules.forEach((module: any, idx: number) => {
-    if (!module || typeof module !== 'object') {
-      console.error(`Module at index ${idx} is not an object:`, module);
-      throw new Error(`Module at index ${idx} is invalid`);
-    }
-    if (!module.id || typeof module.id !== 'string') {
-      console.error(`Module at index ${idx} missing valid id:`, module);
-      throw new Error(`Module at index ${idx} is missing id`);
-    }
-    if (!module.title || typeof module.title !== 'string') {
-      console.error(`Module at index ${idx} missing valid title:`, module);
-      throw new Error(`Module at index ${idx} is missing title`);
-    }
-    if (!module.type || typeof module.type !== 'string') {
-      console.error(`Module at index ${idx} missing valid type:`, module);
-      throw new Error(`Module at index ${idx} is missing type`);
-    }
-    // Ensure quiz is always an array
-    if (!Array.isArray(module.quiz)) {
-      console.warn(`Module at index ${idx} has invalid quiz, fixing:`, module.quiz);
-      module.quiz = []; // Fix it
-    }
-    // Validate and clean quiz items
-    if (Array.isArray(module.quiz)) {
-      module.quiz = module.quiz
-        .filter((q: any) => {
-          return q && typeof q === 'object' && q.question && Array.isArray(q.options);
-        })
-        .map((q: any) => ({
-          question: String(q.question || ''),
-          options: Array.isArray(q.options) ? q.options.map((opt: any) => String(opt)) : [],
-          correctAnswerIndex: typeof q.correctAnswerIndex === 'number' ? q.correctAnswerIndex : 0
-        }));
-    } else {
-      // Fallback: ensure it's an array
-      module.quiz = [];
-    }
+  // Validate each module one more time before saving
+  sanitizedCourse.modules.forEach((module: any, idx: number) => {
+    console.log(`Module ${idx}:`, {
+      id: module.id,
+      title: module.title,
+      type: module.type,
+      typeIsString: typeof module.type === 'string',
+      hasQuiz: Array.isArray(module.quiz),
+      quizLength: module.quiz?.length || 0,
+      hasContentUrl: !!module.contentUrl,
+      contentUrlType: typeof module.contentUrl,
+      contentUrlLength: module.contentUrl?.length || 0
+    });
+    
+    // Final check - ensure no undefined values
+    Object.keys(module).forEach(key => {
+      if (module[key] === undefined) {
+        console.error(`Module ${idx} has undefined value for key: ${key}`);
+        delete module[key];
+      }
+    });
   });
   
-  const docRef = await addDoc(coursesCollection, finalCleanedCourse);
-  return docRef.id;
+  try {
+    const docRef = await addDoc(coursesCollection, sanitizedCourse);
+    return docRef.id;
+  } catch (error: any) {
+    console.error('Firestore error details:', error);
+    console.error('Course data that failed:', JSON.stringify(sanitizedCourse, null, 2));
+    throw error;
+  }
 };
 
 export const updateCourse = async (courseId: string, updates: Partial<Course>) => {
-  await updateDoc(doc(db, 'courses', courseId), updates);
+  // Sanitize updates the same way we sanitize course creation
+  const sanitizeForFirestore = (obj: any): any => {
+    if (obj === null || obj === undefined) {
+      return null;
+    }
+    if (Array.isArray(obj)) {
+      return obj
+        .map(item => sanitizeForFirestore(item))
+        .filter(item => item !== null && item !== undefined);
+    }
+    if (typeof obj === 'object' && obj.constructor === Object) {
+      const cleaned: any = {};
+      for (const key in obj) {
+        if (obj.hasOwnProperty(key) && obj[key] !== undefined) {
+          const cleanedValue = sanitizeForFirestore(obj[key]);
+          if (cleanedValue !== null && cleanedValue !== undefined) {
+            cleaned[key] = cleanedValue;
+          }
+        }
+      }
+      return cleaned;
+    }
+    return obj;
+  };
+
+  // If updating modules, clean them properly
+  if (updates.modules && Array.isArray(updates.modules)) {
+    const cleanedModules = updates.modules.map((module: any, index: number) => {
+      // Convert ModuleType enum to string
+      let typeString: string = 'DOCUMENT';
+      if (typeof module.type === 'string') {
+        typeString = module.type;
+      } else if (module.type) {
+        const typeValue = String(module.type);
+        if (['VIDEO', 'AUDIO', 'DOCUMENT'].includes(typeValue)) {
+          typeString = typeValue;
+        } else {
+          const match = typeValue.match(/(VIDEO|AUDIO|DOCUMENT)/);
+          typeString = match ? match[1] : 'DOCUMENT';
+        }
+      }
+
+      // Clean quiz array
+      let quizArray: any[] = [];
+      if (Array.isArray(module.quiz)) {
+        quizArray = module.quiz
+          .filter((q: any) => {
+            return q && 
+                   typeof q === 'object' && 
+                   q.question && 
+                   typeof q.question === 'string' &&
+                   Array.isArray(q.options);
+          })
+          .map((q: any) => ({
+            question: String(q.question || ''),
+            options: Array.isArray(q.options) 
+              ? q.options
+                  .filter((opt: any) => opt != null && opt !== '')
+                  .map((opt: any) => String(opt))
+              : [],
+            correctAnswerIndex: typeof q.correctAnswerIndex === 'number' 
+              ? Math.max(0, Math.min(q.correctAnswerIndex, (q.options?.length || 1) - 1))
+              : 0
+          }));
+      }
+
+      const cleanedModule: Record<string, any> = {
+        id: String(module.id || `module-${index}`),
+        title: String(module.title || ''),
+        description: String(module.description || ''),
+        type: typeString,
+        quiz: quizArray
+      };
+
+      // Only add optional fields if they have truthy values
+      if (module.contentUrl && typeof module.contentUrl === 'string' && module.contentUrl.trim() !== '') {
+        cleanedModule.contentUrl = module.contentUrl.trim();
+      }
+      if (module.textContent && typeof module.textContent === 'string' && module.textContent.trim() !== '') {
+        cleanedModule.textContent = module.textContent.trim();
+      }
+
+      return cleanedModule;
+    });
+
+    updates.modules = cleanedModules;
+    console.log(`updateCourse: Cleaning ${cleanedModules.length} modules`);
+    console.log('Cleaned modules:', cleanedModules.map((m: any) => ({ id: m.id, title: m.title, type: m.type, hasContentUrl: !!m.contentUrl })));
+  }
+
+  // Sanitize the entire updates object
+  const sanitizedUpdates = sanitizeForFirestore(updates);
+  console.log('Sanitized updates:', JSON.stringify(sanitizedUpdates, null, 2));
+  
+  await updateDoc(doc(db, 'courses', courseId), sanitizedUpdates);
+  console.log(`Course ${courseId} updated in Firestore`);
 };
 
 export const deleteCourse = async (courseId: string) => {
+  // Delete associated files from Storage first
+  const { deleteCourseFiles } = await import('./storage');
+  await deleteCourseFiles(courseId);
+  
+  // Then delete the course document
   await deleteDoc(doc(db, 'courses', courseId));
 };
 

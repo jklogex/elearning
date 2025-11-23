@@ -148,7 +148,7 @@ export const extractTextFromFile = async (
 
     const response = await getAI().models.generateContent({
       model: "gemini-2.5-flash",
-      contents: { parts },
+      contents: [{ parts }],
     });
 
     if (response.text) {
@@ -191,7 +191,7 @@ export const generateQuizFromContent = async (
 
     const response = await getAI().models.generateContent({
       model: "gemini-2.5-flash",
-      contents: { parts },
+      contents: [{ parts }],
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -234,12 +234,24 @@ export const generatePodcast = async (content: string): Promise<string> => {
     // Validate API key before proceeding
     const apiKey = getApiKey();
     validateApiKey(apiKey, 'generar el podcast');
-    // 1. Generate Script
+    // 1. Generate Script - detailed podcast covering the material thoroughly
     const scriptResponse = await getAI().models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: `Escribe un guion de podcast corto e informativo (aprox. 1 minuto) en Español entre dos anfitriones (Ana y Carlos) resumiendo los puntos clave del siguiente texto para empleados:
+      contents: [{ parts: [{ text: `Escribe un guion de podcast en Español entre dos anfitriones (Ana y Carlos) que cubra el siguiente contenido del documento y que no exceda 5 minutos..
+
+IMPORTANTE:
+- NO incluyas introducciones, saludos o despedidas
+- NO hagas referencias genéricas a "cursos de capacitación" o temas generales
+- Comienza directamente con el TÍTULO REAL del documento y su contenido específico
+- Cubre SOLO el material que está en el siguiente texto
+- Explica los conceptos, datos, procedimientos y puntos clave que aparecen en el documento
+- Usa un diálogo natural entre Ana y Carlos para explicar el contenido específico
+- Si el documento habla de seguridad, explica seguridad. Si habla de procesos, explica procesos. NO inventes contenido genérico.
+- Mantén el foco en el contenido real del documento proporcionado
+
+CONTENIDO DEL DOCUMENTO A CUBRIR:
       
-      ${content.substring(0, 10000)}`
+      ${content.substring(0, 50000)}` }] }]
     });
     
     const script = scriptResponse.text || content;
@@ -286,7 +298,7 @@ export const generateDiagram = async (content: string): Promise<string> => {
     validateApiKey(apiKey, 'generar el diagrama');
     const response = await getAI().models.generateContent({
       model: 'gemini-2.5-flash-image',
-      contents: { parts: [{ text: `Crea un diagrama educativo visual, plano y profesional que explique estos conceptos clave en Español: ${content.substring(0, 1000)}. Estilo corporativo, limpio, fondo blanco.` }] },
+      contents: [{ parts: [{ text: `Crea un diagrama educativo visual, plano y profesional que explique estos conceptos clave en Español: ${content.substring(0, 1000)}. Estilo corporativo, limpio, fondo blanco.` }] }],
     });
 
     for (const part of response.candidates![0].content.parts) {
@@ -310,7 +322,7 @@ export const generateVideo = async (content: string): Promise<string> => {
     // 1. Generate Prompt for Veo
     const promptResponse = await getAI().models.generateContent({
       model: "gemini-2.5-flash",
-      contents: `Describe una escena visual cinematográfica de 5 segundos para un video corporativo que represente el siguiente concepto. Solo describe la imagen visual en inglés (para mejor compatibilidad con el modelo de video): ${content.substring(0, 500)}`
+      contents: [{ parts: [{ text: `Describe una escena visual cinematográfica de 5 segundos para un video corporativo que represente el siguiente concepto. Solo describe la imagen visual en inglés (para mejor compatibilidad con el modelo de video): ${content.substring(0, 500)}` }] }]
     });
     
     const videoPrompt = promptResponse.text || "Corporate training concept visualization";

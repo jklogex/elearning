@@ -1,0 +1,38 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Course content files (documents, images, etc.)
+    match /courses/{courseId}/{fileName} {
+      // Allow authenticated users to read course files
+      allow read: if request.auth != null;
+      
+      // Allow authenticated users to upload course files (app-level restricts to admins)
+      // File size limit: 50MB (to accommodate longer audio podcasts)
+      allow create: if request.auth != null && request.resource.size < 50 * 1024 * 1024;
+      
+      // Allow authenticated users to update course files (app-level restricts to admins)
+      allow update: if request.auth != null;
+      
+      // Allow authenticated users to delete course files (app-level restricts to admins)
+      allow delete: if request.auth != null;
+    }
+    
+    // User avatars
+    match /avatars/{userId} {
+      // Users can read any avatar
+      allow read: if request.auth != null;
+      
+      // Users can only upload their own avatar
+      allow write: if request.auth != null 
+                   && request.auth.uid == userId
+                   && request.resource.size < 2 * 1024 * 1024; // 2MB limit
+    }
+    
+    // Default: deny all other access
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
+

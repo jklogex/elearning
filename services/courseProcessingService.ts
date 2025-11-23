@@ -102,12 +102,12 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
 
     const response = await geminiService.getAI().models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: {
+      contents: [{
         parts: [
           { text: 'Transcribe el siguiente audio a texto en Español. Responde solo con el texto transcrito, sin comentarios adicionales.' },
           { inlineData: { mimeType: 'audio/webm', data: base64Audio } }
         ]
-      }
+      }]
     });
 
     return response.text?.trim() || '';
@@ -139,17 +139,41 @@ export const processCourseInBackground = async (
       try {
         const quiz = await generateQuizFromContent(extractedText);
         if (quiz.length > 0) {
-          // Add quiz to first module or create a quiz module
-          updates.modules = [
-            {
-              id: `quiz-${Date.now()}`,
-              title: 'Cuestionario de Evaluación',
-              description: 'Cuestionario generado automáticamente',
-              type: ModuleType.DOCUMENT,
-              quiz,
-              textContent: 'Complete el cuestionario para evaluar su comprensión.'
-            }
-          ];
+          // Clean quiz to ensure all items are valid
+          const cleanedQuiz = quiz
+            .filter((q: any) => {
+              return q && 
+                     typeof q === 'object' && 
+                     q.question && 
+                     typeof q.question === 'string' &&
+                     Array.isArray(q.options) &&
+                     q.options.length > 0;
+            })
+            .map((q: any) => ({
+              question: String(q.question || ''),
+              options: Array.isArray(q.options) 
+                ? q.options
+                    .filter((opt: any) => opt != null && opt !== '')
+                    .map((opt: any) => String(opt))
+                : [],
+              correctAnswerIndex: typeof q.correctAnswerIndex === 'number' 
+                ? Math.max(0, Math.min(q.correctAnswerIndex, (q.options?.length || 1) - 1))
+                : 0
+            }));
+          
+          if (cleanedQuiz.length > 0) {
+            // Add quiz to first module or create a quiz module
+            updates.modules = [
+              {
+                id: `quiz-${Date.now()}`,
+                title: 'Cuestionario de Evaluación',
+                description: 'Cuestionario generado automáticamente',
+                type: ModuleType.DOCUMENT,
+                quiz: cleanedQuiz,
+                textContent: 'Complete el cuestionario para evaluar su comprensión.'
+              }
+            ];
+          }
         }
       } catch (error) {
         console.error('Error generating quiz:', error);
@@ -159,15 +183,31 @@ export const processCourseInBackground = async (
     // Generate podcast if requested
     if (options.generatePodcast) {
       try {
-        const audioData = await generatePodcast(extractedText);
-        modules.push({
+        console.log('Generating podcast...');
+        const audioDataUrl = await generatePodcast(extractedText);
+        console.log('Podcast generated, uploading to Storage...');
+        
+        // Convert data URL to Blob and upload to Storage
+        const response = await fetch(audioDataUrl);
+        const blob = await response.blob();
+        const audioFile = new File([blob], `podcast-${Date.now()}.wav`, { type: 'audio/wav' });
+        
+        // Upload to Storage
+        const { uploadCourseFile } = await import('../lib/firebase/storage');
+        const storageUrl = await uploadCourseFile(audioFile, courseId);
+        console.log('Podcast uploaded to Storage, URL:', storageUrl);
+        
+        const podcastModule = {
           id: `pod-${Date.now()}`,
           title: 'Podcast del Curso',
           description: 'Podcast generado por IA',
-          type: ModuleType.AUDIO,
-          contentUrl: audioData,
-          quiz: []
-        });
+          type: 'AUDIO' as const, // Use string literal instead of enum
+          contentUrl: storageUrl,
+          quiz: [] as any[]
+        };
+        
+        console.log('Podcast module created:', podcastModule);
+        modules.push(podcastModule);
       } catch (error) {
         console.error('Error generating podcast:', error);
       }
@@ -176,15 +216,31 @@ export const processCourseInBackground = async (
     // Generate diagram if requested
     if (options.generateDiagram) {
       try {
-        const imgData = await generateDiagram(extractedText);
-        modules.push({
+        console.log('Generating diagram...');
+        const imgDataUrl = await generateDiagram(extractedText);
+        console.log('Diagram generated, uploading to Storage...');
+        
+        // Convert data URL to Blob and upload to Storage
+        const response = await fetch(imgDataUrl);
+        const blob = await response.blob();
+        const imgFile = new File([blob], `diagram-${Date.now()}.png`, { type: 'image/png' });
+        
+        // Upload to Storage
+        const { uploadCourseFile } = await import('../lib/firebase/storage');
+        const storageUrl = await uploadCourseFile(imgFile, courseId);
+        console.log('Diagram uploaded to Storage, URL:', storageUrl);
+        
+        const diagramModule = {
           id: `diag-${Date.now()}`,
           title: 'Diagrama Visual',
           description: 'Diagrama generado por IA',
-          type: ModuleType.DOCUMENT,
-          contentUrl: imgData,
-          quiz: []
-        });
+          type: 'DOCUMENT' as const, // Use string literal instead of enum
+          contentUrl: storageUrl,
+          quiz: [] as any[]
+        };
+        
+        console.log('Diagram module created:', diagramModule);
+        modules.push(diagramModule);
       } catch (error) {
         console.error('Error generating diagram:', error);
       }
@@ -209,13 +265,34 @@ export const processCourseInBackground = async (
 
     // Update course with generated modules
     if (modules.length > 0 || updates.modules) {
+      console.log(`Updating course ${courseId} with ${modules.length} new modules from modules array`);
+      if (updates.modules) {
+        console.log(`Also have ${updates.modules.length} modules from updates.modules`);
+      }
       const { getCourse } = await import('../lib/firebase/firestore');
       const currentCourse = await getCourse(courseId);
       if (currentCourse) {
         const existingModules = currentCourse.modules || [];
-        const allModules = updates.modules ? [...existingModules, ...updates.modules] : [...existingModules, ...modules];
+        console.log(`Existing modules: ${existingModules.length}`);
+        
+        // Merge all modules: existing + modules (podcast, diagram, etc.) + quiz (last)
+        // Quiz should always be the last module
+        const allModules = [
+          ...existingModules,
+          ...modules,
+          ...(updates.modules || [])  // Quiz goes last
+        ];
+        
+        console.log(`Total modules after merge: ${allModules.length}`);
+        console.log('Modules to save:', allModules.map(m => ({ id: m.id, title: m.title, type: m.type, hasContentUrl: !!m.contentUrl })));
+        
         await updateCourse(courseId, { modules: allModules });
+        console.log('Course updated successfully');
+      } else {
+        console.error(`Course ${courseId} not found`);
       }
+    } else {
+      console.log('No modules to add');
     }
   } catch (error) {
     console.error('Error processing course in background:', error);
